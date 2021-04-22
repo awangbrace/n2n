@@ -270,7 +270,6 @@ int supernode2sock (n2n_sock_t * sn, const n2n_sn_name_t addrIn) {
     supernode_host = strtok(addr, ":");
 
     if(supernode_host) {
-        in_addr_t sn_addr;
         char *supernode_port = strtok(NULL, ":");
         const struct addrinfo aihints = {0, PF_INET, 0, 0, 0, NULL, NULL, NULL};
         struct addrinfo * ainfo = NULL;
@@ -363,9 +362,8 @@ struct peer_info* add_sn_to_list_by_mac_or_sock (struct peer_info **sn_list, n2n
 uint8_t is_multi_broadcast (const n2n_mac_t dest_mac) {
 
     int is_broadcast = (memcmp(broadcast_mac, dest_mac, N2N_MAC_SIZE) == 0);
-    //REVISIT: multicast has bit #24 reset, test!
-    int is_multicast = (memcmp(multicast_mac, dest_mac,            3) == 0);
-    int is_ipv6_multicast = (memcmp(ipv6_multicast_mac, dest_mac,  2) == 0);
+    int is_multicast = (memcmp(multicast_mac, dest_mac, 3) == 0) && !(dest_mac[3] >> 7);
+    int is_ipv6_multicast = (memcmp(ipv6_multicast_mac, dest_mac, 2) == 0);
 
     return is_broadcast || is_multicast || is_ipv6_multicast;
 }
@@ -442,7 +440,7 @@ void print_n2n_version () {
 
 size_t purge_expired_nodes (struct peer_info **peer_list,
                             SOCKET socket_not_to_close,
-                            n2n_tcp_connection_t *tcp_connections,
+                            n2n_tcp_connection_t **tcp_connections,
                             time_t *p_last_purge,
                             int frequency, int timeout) {
 
@@ -465,9 +463,9 @@ size_t purge_expired_nodes (struct peer_info **peer_list,
 
 /** Purge old items from the peer_list, eventually close the related socket, and
   * return the number of items that were removed. */
-size_t purge_peer_list (struct peer_info ** peer_list,
+size_t purge_peer_list (struct peer_info **peer_list,
                         SOCKET socket_not_to_close,
-                        n2n_tcp_connection_t *tcp_connections,
+                        n2n_tcp_connection_t **tcp_connections,
                         time_t purge_before) {
 
     struct peer_info *scan, *tmp;
@@ -478,14 +476,14 @@ size_t purge_peer_list (struct peer_info ** peer_list,
         if((scan->purgeable == SN_PURGEABLE) && (scan->last_seen < purge_before)) {
             if((scan->socket_fd >=0) && (scan->socket_fd != socket_not_to_close)) {
                 if(tcp_connections) {
-                    HASH_FIND_INT(tcp_connections, &scan->socket_fd, conn);
+                    HASH_FIND_INT(*tcp_connections, &scan->socket_fd, conn);
                     if(conn) {
-                        HASH_DEL(tcp_connections, conn);
+                        HASH_DEL(*tcp_connections, conn);
                         free(conn);
                     }
+                    shutdown(scan->socket_fd, SHUT_RDWR);
+                    closesocket(scan->socket_fd);
                 }
-                shutdown(scan->socket_fd, SHUT_RDWR);
-                closesocket(scan->socket_fd);
             }
             HASH_DEL(*peer_list, scan);
             retval++;
@@ -608,6 +606,24 @@ int sock_equal (const n2n_sock_t * a,
 
     /* equal */
     return(1);
+}
+
+/* *********************************************** */
+
+// fills a specified memory area with random numbers
+int memrnd (uint8_t *address, size_t len) {
+
+    for(; len >= 8; len -= 8) {
+        *(uint64_t*)address = n2n_rand();
+        address += 8;
+    }
+
+    for(; len > 0; len--) {
+        *address = n2n_rand();
+        address++;
+    }
+
+    return 0;
 }
 
 /* *********************************************** */

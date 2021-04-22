@@ -47,7 +47,15 @@ int sn_selection_criterion_default (SN_SELECTION_CRITERION_DATA_TYPE *selection_
 /* Set selection_criterion field to 'bad' value (worse than default) according to selected strategy. */
 int sn_selection_criterion_bad (SN_SELECTION_CRITERION_DATA_TYPE *selection_criterion) {
 
-    *selection_criterion = (SN_SELECTION_CRITERION_DATA_TYPE) UINT32_MAX >> 1;
+    *selection_criterion = (SN_SELECTION_CRITERION_DATA_TYPE) (UINT32_MAX >> 1);
+
+    return 0; /* OK */
+}
+
+/* Set selection_criterion field to 'good' value (better than default) according to selected strategy. */
+int sn_selection_criterion_good (SN_SELECTION_CRITERION_DATA_TYPE *selection_criterion) {
+
+    *selection_criterion = (SN_SELECTION_CRITERION_DATA_TYPE) (UINT32_MAX >> 1) - 2;
 
     return 0; /* OK */
 }
@@ -151,19 +159,17 @@ SN_SELECTION_CRITERION_DATA_TYPE sn_selection_criterion_gather_data (n2n_sn_t *s
 extern char * sn_selection_criterion_str (selection_criterion_str_t out, peer_info_t *peer) {
 
     if(NULL == out) {
-        return NULL;
+      return NULL;
     }
     memset(out, 0, SN_SELECTION_CRITERION_BUF_SIZE);
-
+    
+    if(peer->selection_criterion >= 0) {
 #ifndef SN_SELECTION_RTT
-    snprintf(out, SN_SELECTION_CRITERION_BUF_SIZE,
-                  (int16_t)(peer->selection_criterion) >= 0 ? "load = %8d" :
-                                                              "", peer->selection_criterion);
+      snprintf(out, SN_SELECTION_CRITERION_BUF_SIZE, "load = %8d", peer->selection_criterion);
 #else
-    snprintf(out, SN_SELECTION_CRITERION_BUF_SIZE,
-                  (int16_t)(peer->selection_criterion) >= 0 ? "rtt = %6d ms" :
-                                                              "", peer->selection_criterion);
+      snprintf(out, SN_SELECTION_CRITERION_BUF_SIZE, "rtt = %6d ms", peer->selection_criterion);
 #endif
+    }
 
     return out;
 }

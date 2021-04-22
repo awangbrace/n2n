@@ -137,7 +137,6 @@
 #ifdef WIN32
 #include <winsock2.h>           /* for tcp */
 #define SHUT_RDWR   SD_BOTH     /* for tcp */
-#define SOL_TCP     IPPROTO_TCP /* for tcp */
 #include "win32/wintap.h"
 #include <sys/stat.h>
 #else
@@ -212,6 +211,7 @@ void hexdump (const uint8_t * buf, size_t len);
 void print_n2n_version ();
 int is_empty_ip_address (const n2n_sock_t * sock);
 void print_edge_stats (const n2n_edge_t *eee);
+int memrnd (uint8_t *address, size_t len);
 
 /* Sockets */
 char* sock_to_cstr (n2n_sock_str_t out,
@@ -229,14 +229,14 @@ int time_stamp_verify_and_update (uint64_t stamp, uint64_t * previous_stamp, int
 /* Operations on peer_info lists. */
 size_t purge_peer_list (struct peer_info ** peer_list,
                         SOCKET socket_not_to_close,
-                        n2n_tcp_connection_t *tcp_connections,
+                        n2n_tcp_connection_t **tcp_connections,
                         time_t purge_before);
 
 size_t clear_peer_list (struct peer_info ** peer_list);
 
 size_t purge_expired_nodes (struct peer_info **peer_list,
                             SOCKET socket_not_to_close,
-                            n2n_tcp_connection_t *tcp_connections,
+                            n2n_tcp_connection_t **tcp_connections,
                             time_t *p_last_purge,
                             int frequency, int timeout);
 

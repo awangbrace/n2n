@@ -345,7 +345,7 @@ typedef struct n2n_PACKET {
 typedef struct n2n_REGISTER_SUPER {
     n2n_cookie_t       cookie;      /**< Link REGISTER_SUPER and REGISTER_SUPER_ACK */
     n2n_mac_t          edgeMac;     /**< MAC to register with edge sending socket */
-    n2n_sock_t         sock;        /**< Sending socket associated with srcMac */
+    n2n_sock_t         sock;        /**< Sending socket associated with edgeMac */
     n2n_ip_subnet_t    dev_addr;    /**< IP address of the tuntap adapter. */
     n2n_desc_t         dev_desc;    /**< Hint description correlated with the edge */
     n2n_auth_t         auth;        /**< Authentication scheme and tokens */
@@ -355,10 +355,10 @@ typedef struct n2n_REGISTER_SUPER {
 /* Linked with n2n_register_super_ack in n2n_pc_t. Only from supernode to edge. */
 typedef struct n2n_REGISTER_SUPER_ACK {
     n2n_cookie_t       cookie;      /**< Return cookie from REGISTER_SUPER */
-    n2n_mac_t          edgeMac;     /**< MAC registered to edge sending socket */
+    n2n_mac_t          srcMac;      /**< MAC of answering supernode */
     n2n_ip_subnet_t    dev_addr;    /**< Assign an IP address to the tuntap adapter of edge. */
     uint16_t           lifetime;    /**< How long the registration will live */
-    n2n_sock_t         sock;        /**< Sending sockets associated with edgeMac */
+    n2n_sock_t         sock;        /**< Sending sockets associated with edge */
     n2n_auth_t         auth;        /**< Authentication scheme and tokens */
 
     /** The packet format provides additional supernode definitions here.
@@ -366,8 +366,7 @@ typedef struct n2n_REGISTER_SUPER_ACK {
      * n2n_sock_t.
      */
     uint8_t            num_sn;      /**< Number of supernodes that were send
-                                      * even if we cannot store them all. If
-                                      * non-zero then sn_bak is valid. */
+                                       * even if we cannot store them all. */
 } n2n_REGISTER_SUPER_ACK_t;
 
 
@@ -426,6 +425,7 @@ struct peer_info {
     SN_SELECTION_CRITERION_DATA_TYPE selection_criterion;
     uint64_t                         last_valid_time_stamp;
     char                             *ip_addr;
+    uint8_t                          local;
 
     UT_hash_handle     hh; /* makes this structure hashable */
 };
@@ -516,6 +516,9 @@ typedef struct n2n_edge_callbacks {
 
     /* Called periodically in the main loop. */
     void (*main_loop_period)(n2n_edge_t *eee, time_t now);
+
+    /* Called when a new socket to supernode is created. */
+    void (*sock_opened)(n2n_edge_t *eee);
 } n2n_edge_callbacks_t;
 
 typedef struct n2n_tuntap_priv_config {
@@ -634,6 +637,7 @@ struct n2n_edge {
     /* Sockets */
     /* supernode socket is in        eee->curr_sn->sock (of type n2n_sock_t) */
     int                              sock;
+    int                              close_socket_counter;               /**< counter for close-event before re-opening */
     int                              udp_mgmt_sock;                      /**< socket for status info. */
 
 #ifndef SKIP_MULTICAST_PEERS_DISCOVERY
@@ -671,18 +675,28 @@ typedef struct sn_stats {
     time_t last_reg_super; /* Time when last REGISTER_SUPER was received. */
 } sn_stats_t;
 
-struct sn_community {
-    char            community[N2N_COMMUNITY_SIZE];
-    uint8_t         is_federation;          /* if not-zero, then the current community is the federation of supernodes */
-    uint8_t         purgeable;              /* indicates purgeable community (fixed-name, predetermined (-c parameter) communties usually are unpurgeable) */
-    uint8_t         header_encryption;      /* Header encryption indicator. */
-    he_context_t    *header_encryption_ctx; /* Header encryption cipher context. */
-    he_context_t    *header_iv_ctx;         /* Header IV ecnryption cipher context, REMOVE as soon as seperate fields for checksum and replay protection available */
-    struct          peer_info *edges;       /* Link list of registered edges. */
-    int64_t         number_enc_packets;     /* Number of encrypted packets handled so far, required for sorting from time to time */
-    n2n_ip_subnet_t auto_ip_net;            /* Address range of auto ip address service. */
+typedef struct node_supernode_association {
+
+    n2n_mac_t                   mac;        /* mac address of an edge                          */
+    const struct sockaddr_in    sock;       /* network order socket of that edge's supernode   */
+    time_t                      last_seen;  /* time mark to keep track of purging requirements */
 
     UT_hash_handle hh;                      /* makes this structure hashable */
+} node_supernode_association_t;
+
+struct sn_community {
+    char                          community[N2N_COMMUNITY_SIZE];
+    uint8_t                       is_federation;          /* if not-zero, then the current community is the federation of supernodes */
+    uint8_t                       purgeable;              /* indicates purgeable community (fixed-name, predetermined (-c parameter) communties usually are unpurgeable) */
+    uint8_t                       header_encryption;      /* Header encryption indicator. */
+    he_context_t                  *header_encryption_ctx; /* Header encryption cipher context. */
+    he_context_t                  *header_iv_ctx;         /* Header IV ecnryption cipher context, REMOVE as soon as seperate fields for checksum and replay protection available */
+    struct                        peer_info *edges;       /* Link list of registered edges. */
+    node_supernode_association_t  *assoc;            /* list of other edges from this community and their supernodes */
+    int64_t                       number_enc_packets;     /* Number of encrypted packets handled so far, required for sorting from time to time */
+    n2n_ip_subnet_t               auto_ip_net;            /* Address range of auto ip address service. */
+
+    UT_hash_handle hh;                                    /* makes this structure hashable */
 };
 
 /* Typedef'd pointer to get abstract datatype. */
@@ -696,15 +710,17 @@ struct sn_community_regular_expression {
 
 
 typedef struct n2n_tcp_connection {
-    SOCKET socket_fd;       /* file descriptor for tcp socket */
+    int    socket_fd;       /* file descriptor for tcp socket */
     struct sockaddr sock;   /* network order socket */
 
     uint16_t expected;                                    /* number of bytes expected to be read */
-    uint16_t position;                                    /* current position in the buffer*/
+    uint16_t position;                                    /* current position in the buffer */
     uint8_t  buffer[N2N_PKT_BUF_SIZE + sizeof(uint16_t)]; /* buffer for data collected from tcp socket incl. prepended length */
+    uint8_t  inactive;                                    /* connection not be handled if set, already closed and to be deleted soon */
 
     UT_hash_handle hh; /* makes this structure hashable */
 } n2n_tcp_connection_t;
+
 
 typedef struct n2n_sn {
     time_t                                 start_time;      /* Used to measure uptime. */
