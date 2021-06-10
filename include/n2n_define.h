@@ -62,6 +62,10 @@
 
 #define SORT_COMMUNITIES_INTERVAL        90 /* sec. until supernode sorts communities' hash list again */
 
+#define AF_INVALID                       -1 /* to mark a socket invalid by an invalid address family (do not use AF_UNSPEC, it could turn into auto-detect) */
+#define N2N_RESOLVE_INTERVAL            300 /* seconds until edge and supernode try to resolve supernode names again */
+#define N2N_RESOLVE_CHECK_INTERVAL       30 /* seconds until main loop checking in on changes from resolver thread */
+
 #define ETH_FRAMESIZE 14
 #define IP4_SRCOFFSET 12
 #define IP4_DSTOFFSET 16
@@ -154,6 +158,8 @@ enum skip_add{SN_ADD = 0, SN_ADD_SKIP = 1, SN_ADD_ADDED = 2};
 #define N2N_PKT_VERSION            3
 #define N2N_DEFAULT_TTL            2  /* can be forwarded twice at most */
 #define N2N_COMMUNITY_SIZE         20
+#define N2N_PRIVATE_PUBLIC_KEY_SIZE 32
+#define N2N_USER_KEY_LINE_STARTER  '*'
 #define N2N_MAC_SIZE               6
 #define N2N_COOKIE_SIZE            4
 #define N2N_DESC_SIZE              16
@@ -176,9 +182,9 @@ enum skip_add{SN_ADD = 0, SN_ADD_SKIP = 1, SN_ADD_ADDED = 2};
 #define N2N_TRANSFORM_ID_MAX                65535
 
 #ifndef max
-#define max(a, b) ((a < b) ? b : a)
+#define max(a, b) (((a) < (b)) ? (b) : (a))
 #endif
 
 #ifndef min
-#define min(a, b) ((a > b) ? b : a)
+#define min(a, b) (((a) >(b)) ? (b) : (a))
 #endif

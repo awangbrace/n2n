@@ -50,6 +50,8 @@ int supernode_disconnect (n2n_edge_t *eee);
 int fetch_and_eventually_process_data (n2n_edge_t *eee, SOCKET sock,
                                        uint8_t *pktbuf, uint16_t *expected, uint16_t *position,
                                        time_t now);
+int resolve_create_thread (n2n_resolve_parameter_t **param, struct peer_info *sn_list);
+int resolve_check (n2n_resolve_parameter_t *param, uint8_t resolution_request, time_t now);
 
 /* ***************************************************** */
 
@@ -123,10 +125,12 @@ static int scan_address (char * ip_addr, size_t addr_size,
 
 static void help (int level) {
 
+    if(level == 0) return; /* no help required */
+
     printf("\n");
     print_n2n_version();
 
-    if(level == 0) /* short help */ {
+    if(level == 1) /* short help */ {
 
         printf("   basic usage:  edge <config file> (see edge.conf)\n"
                "\n"
@@ -148,7 +152,7 @@ static void help (int level) {
                "\n   man  files for n2n, edge, and superndode contain in-depth information"
                "\n\n");
 
-    } else if(level == 1) /* quick reference */ {
+    } else if(level == 2) /* quick reference */ {
 
         printf(" general usage:  edge <config file> (see edge.conf)\n"
            "\n"
@@ -186,8 +190,11 @@ static void help (int level) {
                "[-E] "
                "[-I <edge description>] "
             "\n                      "
+               "[-J <password>] "
+               "[-P <public key>] "
                "[-R <rule string>] "
 #ifdef WIN32
+            "\n                      "
                "[-x <metric>] "
 #endif
           "\n\n local options        "
@@ -252,7 +259,7 @@ static void help (int level) {
 #endif
 "\n");
         printf(" -i <reg_interval> | registration interval, for NAT hole punching (default\n"
-               "                   | 20 seconds)\n");
+               "                   | %u seconds)\n", REGISTER_SUPER_INTERVAL_DFL);
         printf(" -L <reg_ttl>      | TTL for registration packet for NAT hole punching through\n"
                "                   | supernode (default 0 for not set)\n");
         printf(" -k <key>          | encryption key (ASCII) - also N2N_KEY=<key>\n");
@@ -283,7 +290,9 @@ static void help (int level) {
         printf(" -r                | enable packet forwarding through n2n community\n");
         printf(" -E                | accept multicast MAC addresses, drop by default\n");
         printf(" -I <description>  | annotate the edge's description used for easier\n"
-               "                   | identification in management port output\n");
+               "                   | identification in management port output or username\n");
+        printf(" -J <password>     | password for user-password edge authentication\n");
+        printf(" -P <public key>   | federation public key for user-password authentication\n");
         printf(" -R <rule>         | drop or accept packets by rules, can be set multiple times\n");
         printf("                   | rule format:    'src_ip/n:[s_port,e_port],...\n"
                "                   |    |on same|  ...dst_ip/n:[s_port,e_port],...\n"
@@ -298,7 +307,8 @@ static void help (int level) {
 #ifndef WIN32
         printf(" -f                | do not fork and run as a daemon, rather run in foreground\n");
 #endif
-        printf(" -t <port>         | management UDP port, for multiple edges on a machine\n");
+        printf(" -t <port>         | management UDP port, for multiple edges on a machine,\n"
+               "                   | defaults to %u\n", N2N_EDGE_MGMT_PORT);
         printf(" -v                | make more verbose, repeat as required\n");
         printf(" -n <cidr:gateway> | route an IPv4 network via the gateway, use 0.0.0.0/0 for\n"
                "                   | the default gateway, can be set multiple times\n");
@@ -419,7 +429,7 @@ static int setOption (int optkey, char *optargument, n2n_tuntap_priv_config_t *e
 
         case 'E': /* multicast ethernet addresses accepted. */ {
             conf->drop_multicast = 0;
-            traceEvent(TRACE_DEBUG, "Enabling ethernet multicast traffic");
+            traceEvent(TRACE_INFO, "Enabling ethernet multicast traffic");
             break;
         }
 
@@ -535,11 +545,35 @@ static int setOption (int optkey, char *optargument, n2n_tuntap_priv_config_t *e
             break;
         }
 #endif
-
-        case 'I': /* Device Description (hint) */ {
+        case 'I': /* Device Description (hint) or username */ {
             memset(conf->dev_desc, 0, N2N_DESC_SIZE);
             /* reserve possible last char as null terminator. */
             strncpy((char *)conf->dev_desc, optargument, N2N_DESC_SIZE-1);
+            break;
+        }
+
+        case 'J': /* password for user-password authentication */ {
+            conf->shared_secret = calloc(1, sizeof(n2n_private_public_key_t));
+            if(conf->shared_secret)
+                generate_private_key(*(conf->shared_secret), optargument);
+
+            // the hash of the username (-I) gets xored into this key later,
+            // we can't be sure to already have it at this point
+            // also, the complete shared secret will be calculated then as we
+            // might still be missing the federation public key as well
+            break;
+        }
+
+        case 'P': /* federation public key for user-password authentication */ {
+            if(strlen(optargument) < ((N2N_PRIVATE_PUBLIC_KEY_SIZE * 8 + 5)/ 6 + 1)) {
+                conf->federation_public_key = calloc(1, sizeof(n2n_private_public_key_t));
+                if(conf->federation_public_key) {
+                    ascii_to_bin(*(conf->federation_public_key), optargument);
+                }
+            } else {
+                traceEvent(TRACE_WARNING, "Public key too long.");
+                return 2;
+            }
             break;
         }
 
@@ -547,7 +581,7 @@ static int setOption (int optkey, char *optargument, n2n_tuntap_priv_config_t *e
             conf->local_port = atoi(optargument);
 
             if(conf->local_port == 0) {
-                traceEvent(TRACE_WARNING, "Bad local port format");
+                traceEvent(TRACE_WARNING, "Bad local port format, using OS assigned port.");
                 break;
             }
 
@@ -558,7 +592,6 @@ static int setOption (int optkey, char *optargument, n2n_tuntap_priv_config_t *e
             conf->mgmt_port = atoi(optargument);
             break;
         }
-
 #ifdef __linux__
         case 'T': {
             if((optargument[0] == '0') && (optargument[1] == 'x'))
@@ -569,14 +602,13 @@ static int setOption (int optkey, char *optargument, n2n_tuntap_priv_config_t *e
             break;
         }
 #endif
-
         case 'n': {
             char cidr_net[64], gateway[64];
             n2n_route_t route;
 
             if(sscanf(optargument, "%63[^/]/%hhd:%63s", cidr_net, &route.net_bitlen, gateway) != 3) {
-                traceEvent(TRACE_WARNING, "Bad cidr/gateway format '%d'. See -h.", optargument);
-                break;
+                traceEvent(TRACE_WARNING, "Bad cidr/gateway format '%d'.", optargument);
+                return 2;
             }
 
             route.net_addr = inet_addr(cidr_net);
@@ -584,20 +616,20 @@ static int setOption (int optkey, char *optargument, n2n_tuntap_priv_config_t *e
 
             if((route.net_bitlen < 0) || (route.net_bitlen > 32)) {
                 traceEvent(TRACE_WARNING, "Bad prefix '%d' in '%s'", route.net_bitlen, optargument);
-                break;
+                return 2;
             }
 
             if(route.net_addr == INADDR_NONE) {
                 traceEvent(TRACE_WARNING, "Bad network '%s' in '%s'", cidr_net, optargument);
-                break;
+                return 2;
             }
 
             if(route.gateway == INADDR_NONE) {
                 traceEvent(TRACE_WARNING, "Bad gateway '%s' in '%s'", gateway, optargument);
-                break;
+                return 2;
             }
 
-            traceEvent(TRACE_DEBUG, "Adding %s/%d via %s", cidr_net, route.net_bitlen, gateway);
+            traceEvent(TRACE_NORMAL, "Adding %s/%d via %s", cidr_net, route.net_bitlen, gateway);
 
             conf->routes = realloc(conf->routes, sizeof(struct n2n_route) * (conf->num_routes + 1));
             conf->routes[conf->num_routes] = route;
@@ -628,13 +660,11 @@ static int setOption (int optkey, char *optargument, n2n_tuntap_priv_config_t *e
         }
 
         case 'h': /* quick reference */ {
-            help(1);
-            break;
+            return 2;
         }
 
         case '@': /* long help */ {
-            help(2);
-            break;
+            return 3;
         }
 
         case 'v': /* verbose */
@@ -650,7 +680,7 @@ static int setOption (int optkey, char *optargument, n2n_tuntap_priv_config_t *e
             } else {
                 free(new_rule);
                 traceEvent(TRACE_WARNING, "Invalid filter rule: %s", optargument);
-                return(-1);
+                return 2;
             }
             break;
         }
@@ -662,12 +692,12 @@ static int setOption (int optkey, char *optargument, n2n_tuntap_priv_config_t *e
         }
 #endif
         default: {
-            traceEvent(TRACE_WARNING, "Unknown option -%c: Ignored", (char)optkey);
-            return(-1);
+            traceEvent(TRACE_WARNING, "Unknown option -%c", (char)optkey);
+            return 2;
         }
     }
 
-    return(0);
+    return 0;
 }
 
 /* *********************************************** */
@@ -693,7 +723,7 @@ static int loadFromCLI (int argc, char *argv[], n2n_edge_conf_t *conf, n2n_tunta
     u_char c;
 
     while ((c = getopt_long(argc, argv,
-                            "k:a:bc:Eu:g:m:M:s:d:l:p:fvhrt:i:I:S::DL:z::A::Hn:R:"
+                            "k:a:bc:Eu:g:m:M:s:d:l:p:fvhrt:i:I:J:P:S::DL:z::A::Hn:R:"
 #ifdef __linux__
                             "T:"
 #endif
@@ -704,7 +734,7 @@ static int loadFromCLI (int argc, char *argv[], n2n_edge_conf_t *conf, n2n_tunta
                             long_options, NULL)) != '?') {
 
         if(c == 255) break;
-        setOption(c, optarg, ec, conf);
+        help(setOption(c, optarg, ec, conf));
 
     }
 
@@ -921,19 +951,50 @@ int main (int argc, char* argv[]) {
         rc = -1;
 #endif
 
+    // --- additional crypto setup; REVISIT: move to edge_init()?
+    // payload
     if(conf.transop_id == N2N_TRANSFORM_ID_NULL) {
         if(conf.encrypt_key) {
-            /* make sure that AES is default cipher if key only (and no cipher) is specified */
+            // make sure that AES is default cipher if key only (and no cipher) is specified
             traceEvent(TRACE_WARNING, "Switching to AES as key was provided.");
             conf.transop_id = N2N_TRANSFORM_ID_AES;
         }
     }
+    // user auth
+    if(conf.shared_secret /* containing private key only so far*/) {
+        // if user-password auth and no federation public key provided, use default
+        if(!conf.federation_public_key) {
+            conf.federation_public_key = calloc(1, sizeof(n2n_private_public_key_t));
+            if(conf.federation_public_key) {
+                traceEvent(TRACE_WARNING, "Using default federation public key. FOR TESTING ONLY, usage of a custom federation name and key (-P) is highly recommended!");
+                generate_private_key(*(conf.federation_public_key), FEDERATION_NAME + 1);
+                generate_public_key(*(conf.federation_public_key), *(conf.federation_public_key));
+            }
+        }
+        // calculate public key and shared secret
+        if(conf.federation_public_key) {
+            traceEvent(TRACE_NORMAL, "Using username and password for edge authentication.");
+            bind_private_key_to_username(*(conf.shared_secret), conf.dev_desc);
+            conf.public_key = calloc(1, sizeof(n2n_private_public_key_t));
+            if(conf.public_key)
+                generate_public_key(*conf.public_key, *(conf.shared_secret));
+            generate_shared_secret(*(conf.shared_secret), *(conf.shared_secret), *(conf.federation_public_key));
+            // prepare (first 128 bit) for use as key
+            conf.shared_secret_ctx = (he_context_t*)calloc(1, sizeof(speck_context_t));
+            speck_init((speck_context_t**)&(conf.shared_secret_ctx), *(conf.shared_secret), 128);
+        }
+        // force header encryption
+        if(conf.header_encryption != HEADER_ENCRYPTION_ENABLED) {
+            traceEvent(TRACE_NORMAL, "Enabling header encryption for edge authentication.");
+            conf.header_encryption = HEADER_ENCRYPTION_ENABLED;
+        }
+    }
 
     if(rc < 0)
-        help(0); /* short help */
+        help(1); /* short help */
 
     if(edge_verify_conf(&conf) != 0)
-        help(0); /* short help */
+        help(1); /* short help */
 
     traceEvent(TRACE_NORMAL, "Starting n2n edge %s %s", PACKAGE_VERSION, PACKAGE_BUILDDATE);
 
@@ -961,6 +1022,11 @@ int main (int argc, char* argv[]) {
         traceEvent(TRACE_ERROR, "Failed in edge_init");
         exit(1);
     }
+
+    if(resolve_create_thread(&(eee->resolve_parameter), eee->conf.supernodes) == 0) {
+         traceEvent(TRACE_NORMAL, "Successfully created resolver thread");
+    }
+
     memcpy(&(eee->tuntap_priv_conf), &ec, sizeof(ec));
 
     if((0 == strcmp("static", eee->tuntap_priv_conf.ip_mode)) ||
@@ -979,8 +1045,9 @@ int main (int argc, char* argv[]) {
     // for the sake of quickly establishing connection. REVISIT when a more elegant way to re-use main loop code
     // is found
 
-    // if more than one supernode given, find at least one who is alive to faster establish connection
-    if((HASH_COUNT(eee->conf.supernodes) <= 1) || (eee->conf.connect_tcp)) {
+    // find at least one supernode alive to faster establish connection
+    // exceptions:
+    if((HASH_COUNT(eee->conf.supernodes) <= 1) || (eee->conf.connect_tcp) || (eee->conf.shared_secret)) {
         // skip the initial supernode ping
         traceEvent(TRACE_DEBUG, "Skip PING to supernode.");
         runlevel = 2;
@@ -1105,8 +1172,9 @@ int main (int argc, char* argv[]) {
                 }
             }
         }
-
         seek_answer = 1;
+
+        resolve_check(eee->resolve_parameter, 0 /* no intermediate resolution requirement at this point */, now);
     }
     // allow a higher number of pings for first regular round of ping
     // to quicker get an inital 'supernode selection criterion overview'
